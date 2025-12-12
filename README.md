@@ -150,7 +150,7 @@ Typical idle usage:
 LIMITATIONS
 -
 
-- Streaming (stream=true) not yet supported
+- Streaming (stream=true) not yet supported  ***ALREADY SUPPORTED!***
 - Tool / function calling not implemented
 - Cloud latency applies by design
 
