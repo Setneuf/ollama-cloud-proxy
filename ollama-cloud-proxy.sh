@@ -83,7 +83,9 @@ pip install --no-cache-dir fastapi uvicorn requests
 
 cat > main.py <<'PYEOF'
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import StreamingResponse
 import requests
+import json
 
 TOKEN_FILE = "/etc/ollama-cloud/token"
 OLLAMA_CHAT_URL = "https://ollama.com/api/chat"
@@ -95,7 +97,7 @@ def token():
 app = FastAPI()
 
 # -------------------------------------------------
-# /api/chat  (messages-based)
+# /api/chat
 # -------------------------------------------------
 @app.post("/api/chat")
 async def chat(req: Request):
@@ -103,6 +105,7 @@ async def chat(req: Request):
 
     model = body.get("model")
     messages = body.get("messages")
+    stream = body.get("stream", False)
 
     if not model or not messages:
         raise HTTPException(status_code=400, detail="Invalid chat request")
@@ -110,7 +113,7 @@ async def chat(req: Request):
     payload = {
         "model": model,
         "messages": messages,
-        "stream": False
+        "stream": stream
     }
 
     headers = {
@@ -122,17 +125,47 @@ async def chat(req: Request):
         OLLAMA_CHAT_URL,
         json=payload,
         headers=headers,
-        timeout=120
+        stream=stream,
+        timeout=300
     )
 
-    if r.status_code != 200:
-        raise HTTPException(status_code=502, detail=r.text)
+    if not stream:
+        if r.status_code != 200:
+            raise HTTPException(status_code=502, detail=r.text)
+        return r.json()
 
-    return r.json()
+    # -------- STREAMING MODE --------
+    def event_stream():
+        for line in r.iter_lines():
+            if not line:
+                continue
+
+            data = json.loads(line.decode())
+
+            content = data.get("message", {}).get("content")
+
+            # 🔹 FILTRO: ignora chunks vazios (warm-up)
+            if content:
+                yield json.dumps({
+                    "message": {
+                        "role": "assistant",
+                        "content": content
+                    },
+                    "done": False
+                }) + "\n"
+
+            if data.get("done") is True:
+                yield json.dumps({"done": True}) + "\n"
+                break
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/json"
+    )
 
 
 # -------------------------------------------------
-# /api/generate  (prompt-based)
+# /api/generate
 # -------------------------------------------------
 @app.post("/api/generate")
 async def generate(req: Request):
@@ -140,20 +173,17 @@ async def generate(req: Request):
 
     model = body.get("model")
     prompt = body.get("prompt")
+    stream = body.get("stream", False)
 
     if not model or not prompt:
         raise HTTPException(status_code=400, detail="Invalid generate request")
 
-    # Traduz generate -> chat (Cloud só fala chat)
     payload = {
         "model": model,
         "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "user", "content": prompt}
         ],
-        "stream": False
+        "stream": stream
     }
 
     headers = {
@@ -165,25 +195,48 @@ async def generate(req: Request):
         OLLAMA_CHAT_URL,
         json=payload,
         headers=headers,
-        timeout=120
+        stream=stream,
+        timeout=300
     )
 
-    if r.status_code != 200:
-        raise HTTPException(status_code=502, detail=r.text)
+    if not stream:
+        if r.status_code != 200:
+            raise HTTPException(status_code=502, detail=r.text)
 
-    cloud = r.json()
-
-    # Converter resposta chat -> generate (compatível Ollama)
-    try:
+        cloud = r.json()
         content = cloud["message"]["content"]
-    except Exception:
-        raise HTTPException(status_code=502, detail="Invalid cloud response")
 
-    return {
-        "model": model,
-        "response": content,
-        "done": True
-    }
+        return {
+            "model": model,
+            "response": content,
+            "done": True
+        }
+
+    # -------- STREAMING MODE --------
+    def event_stream():
+        for line in r.iter_lines():
+            if not line:
+                continue
+
+            data = json.loads(line.decode())
+
+            content = data.get("message", {}).get("content")
+
+            # 🔹 FILTRO: ignora chunks vazios (warm-up)
+            if content:
+                yield json.dumps({
+                    "response": content,
+                    "done": False
+                }) + "\n"
+
+            if data.get("done") is True:
+                yield json.dumps({"done": True}) + "\n"
+                break
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/json"
+    )
 
 
 # -------------------------------------------------
